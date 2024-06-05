@@ -112,3 +112,111 @@ highfst_num_tileplot <- ggplot(highfst_num, aes(x = V1, y = V2, fill = V3)) +
   coord_flip()
 highfst_num_tileplot
 ```
+# Selection - raisd
+```R
+## raisd ----------------------------------------------------------------------
+library(magrittr)
+### data prcessing ---------------------------------------------------------------
+raisd_dir <- "./selection/raisd/data/"
+
+raisd_data <- dir(raisd_dir, pattern = "Ppz_chr", full.names = T) %>%
+  purrr::map(
+    ., ~read.table(., header = F) %>%
+      set_colnames(c("Pos", "Start", "End", "Var", "Sfs", "Ld", "mu")) %>%
+      mutate(Haploid = paste0("hap", substr(.x, nchar(.x), nchar(.x)))) %>%
+      mutate(Chr =substr(.x, str_locate(.x, "Ppz_chr.*")[1], str_locate(.x, "Ppz_chr.*")[2])) %>%
+      mutate(Lineage =substr(.x, str_locate(.x, "L\\d")[1], str_locate(.x, "L\\d")[2]))
+  )%>% 
+  bind_rows() 
+
+chr_length <- read.table("./selection/raisd/GD1913_hapAB.fasta.fai") %>%
+  reshape2::melt(id.vars = "V1") %>% 
+  select(-2) %>%
+  set_colnames(c("Chr","Pos")) %>%
+  mutate(Start = Pos-1, End = Pos, Var = 0, Sfs = 0, Ld = 0, mu = -0.02) %>%
+  mutate(Haploid = ifelse(substr(Chr,nchar(Chr),nchar(Chr)) == "A", "hapA",ifelse(substr(Chr,nchar(Chr),nchar(Chr)) == "B", "hapB", NA)))
+
+raisd_data <- bind_rows(raisd_data, chr_length)
+
+raisd_threshold <- raisd_data %>% 
+  group_by(Lineage, Haploid) %>% 
+  summarise(Threshold = quantile(mu, probs = 0.99)) %>% 
+  drop_na()
+
+raisd_data <- raisd_data %>% 
+  left_join(raisd_threshold, by = c("Lineage","Haploid")) %>% 
+  mutate(Top = mu > Threshold) %>%
+  mutate(length = End - Start)
+
+raisd_data_selected <- raisd_data %>% 
+  filter(Top == TRUE) 
+
+### circle plot -------------------------------------------------------------------
+
+raisd_data_selected_circ <- raisd_data_selected %>% 
+  select(Chr, Start, End, mu, Lineage) %>% 
+  mutate(Chr = substr(Chr, 8,10)) 
+
+library(GenomicRanges)
+
+gr <- GRanges(raisd_data_selected_circ)
+gr_list <- split(gr, mcols(gr)$Lineage)
+gr_reduced_list <- lapply(gr_list, IRanges::reduce)
+
+gr_reduced <- unlist(gr_reduced_list)
+gr_reduced_matrix <- list()
+
+for(i in 1:length(gr_reduced)){
+  df <- as.data.frame(gr_reduced[[i]])
+  df$Lineage <- deparse(names(gr_reduced[i]))
+  gr_reduced_matrix[[i]] <- df
+}
+
+gr_reduced_matrix <- do.call(rbind, gr_reduced_matrix) %>% 
+  dplyr::rename("Chromosome" = "seqnames")
+write.table(gr_reduced_matrix, file = "./selection/raisd/raisd_regions_combined.txt", quote = F, row.names = F, sep = "\t")
+
+total_length <- gr_reduced_matrix %>% 
+  group_by(Lineage) %>% 
+  summarise(total_length = sum(width)) %>% 
+  mutate(percent = total_length / 1700000000)
+
+te_density <- read.table("selection/raisd/te_density2", header = T) %>% 
+  mutate(chr = str_sub(chr, 8,11), start = start + 1, value = value/max(value)) %>% 
+  filter(value != 0)
+
+library("circlize")
+
+pdf("./selection/raisd/plot/circle990-te.pdf", height = 5, width = 5)
+circos.clear()
+circos.par("clock.wise" = T, start.degree = 80, gap.after = c(rep(1,17), 1, rep(1,17), 20), cell.padding = c(0,1,0,1))
+cytoband.df <- read.table(file = "./selection/raisd/GD1913_hapAB.fasta.fai", header = F, colClasses = c("character", "numeric", "numeric"),sep = "\t") %>% 
+  mutate(V1 = str_replace_all(V1, "Ppz_chr", ""))
+circos.genomicInitialize(
+  cytoband.df,major.by = 50000000,
+  axis.labels.cex = 0.25*par("cex"),
+  labels.cex = 0.6*par("cex"))
+chrcolor = c(rep("#fda277",18), rep("#89b6ff", 18))
+circos.genomicTrackPlotRegion(cytoband.df,ylim=c(0,0.1),track.height=0.03,bg.col=chrcolor,bg.lwd=0.4,cell.padding=c(0.01, 0.5, 0.01, 0.5))
+circos.genomicDensity(te_density, col = c("#FF8800"), track.height = 0.05, area = F, border = NA, type = "l")
+
+for (lineage in names(gr_reduced_list)){
+  gr_sub <- as.data.frame(gr_reduced_list[[lineage]])
+  circos.genomicTrack(
+    gr_sub, 
+    track.height=0.05, 
+    ylim = c(0,1), 
+    bg.border = NA, bg.col = "#fdecdd",
+    panel.fun = function(region, value, ...){
+      circos.rect(
+        xleft = region$start,
+        xright = region$end, 
+        ytop = rep(1,nrow(region)), 
+        ybottom = rep(0,nrow(region)), 
+        col = col_L6[lineage], border = NA)
+    }
+  )
+}
+dev.off()
+
+```
