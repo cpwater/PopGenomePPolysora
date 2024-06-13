@@ -1,11 +1,63 @@
 
 # 1. Reads mapping 
 
+```Bash
+genomedir=REFRENCE_GENOME_DIRECTORY
+datadir=SEQUENCING_DATA_DIRECTORY
+bamdir=OUTPUT_BAM_FILE_DIRECTORY
+
+for file in `ls $datadir | grep "R1.fq.gz" | sed 's/_R[0-9].fq.gz//g' | sort -u `
+do
+echo $file
+hisat2 -p 10 -x $genomedir/GD1913_hapAB_index -1 $datadir/${file}_R1.fq.gz -2 $datadir/${file}_R2.fq.gz -S $bamdir/${file}_GD1913_hapAB.sam --rg-id ${file} --rg SM:${file} 2> $bamdir/${file}_GD1913_hapAB_mappingrate.txt
+samtools sort -@ 15 $bamdir/${file}_GD1913_hapAB.sam -o $bamdir/${file}_GD1913_hapAB_sorted.bam --reference $genomedir/GD1913_hapAB.fasta
+samtools index $bamdir/${file}_GD1913_hapAB_sorted.bam
+done
+```
+
+
 # 2. Variant calling
+
+```bash
+while read line
+do
+freebayes -f GD1913_hapAB.fasta -L bamlist -r ${line} -p 2 > diploid/hapAB.DNA.diploid.${line}.vcf&
+done < chrlist
+
+ls \*A.vcf >test
+ls \*B.vcf >> test
+bcftools concat -f list > hapAB.vcf
+
+vcffilter -f "QUAL > 20 & QUAL / AO > 5 & SAF > 0 & SAR > 0 & RPR > 1 & RPL > 1 & AC > 0" hapAB.vcf > hapAB_filter.vcf
+
+vcftools --vcf hapAB_filter.vcf \
+	--max-missing 0.9 --maf 0.05 \
+	--min-alleles 2 --max-alleles 2 \
+	--minDP 5 \
+	--recode --recode-INFO-all \
+	--stdout > hapAB_filter_09005.vcf
+```
 
 # 3. Population genetics
 
+
 ## 3.1 Admixture and phylogenetic tree
+
+```bash
+plink --vcf hapAB_filter_09005.vcf -recode12 --make-bed --out hapAB_09005 --allow-extra-chr --vcf-half-call m --noweb
+
+for k in {2..12}; do admixture -s 123456789 --cv $2.bed $k -j10 -B2000| tee log${k}.out; done
+
+grep -h CV log*.out > cv
+```
+
+```bash
+python vcf2phylip.py -i hapAB_filter_09005.vcf
+#rename hapAB_filter_09005.min4.phy to hapAB_filter_09005.phy
+iqtree -s hapAB_filter_09005.phy -m MFP+ASC --seqtype DNA -bb 1000 -bnni -T AUTO -ntmax 20 -redo -safe -cmax 15 --quiet&
+#this process will teminate and create a new phy file. Use the new one to rerun iqtree
+```
+
 ``` R
 library("tidyverse")
 library("reshape2")
@@ -53,6 +105,17 @@ ggsave(mltree_plot_combine, file = "./Admixture/admixture_tree.pdf", width = 8, 
 
 ```
 ## 3.2PCA
+
+```bash
+#!bin/bash
+#usage:bash plink_pca.sh VCFFILE PUTPUT_FILENAME
+mkdir temp
+plink --vcf $1 --recode --out temp/$2 --allow-extra-chr --vcf-half-call m --noweb
+plink --allow-extra-chr --file temp/$2 --noweb --make-bed --out temp/$2
+plink --allow-extra-chr --threads 20 -bfile temp/$2 --pca 30 --out temp/$2 #--keep keeplist 
+awk '{print $2"\t"$3"\t"$4"\t"$5}' temp/$2.eigenvec > pcaplot_$2.txt
+```
+
 ```R
 col_L6 <- c("L1" = "#cc79a7", "L2" = "#4caf49", "L3" = "#fdbf70", "L4" = "#e66434", "L5" = "#4dbbd6", "L6" = "#974ea2")
 popInfoDNA <- read.table("./Data/popInfo.txt", sep = "\t", header = T) 
@@ -72,8 +135,28 @@ pca09005_pc12 <- ggplot(data = pca_plink_09005, aes(x = PC1, y = PC2)) +
 ggsave(pca09005_pc12, file= "./PCA/hapA_09005pc12.pdf", width = 6, height = 4)
 ```
 ## 3.3 fst
-```R
 
+```bash
+vcffiles=VCFFILE
+
+arr=(1 2 3 4 5 6)
+len=${#arr[@]}
+
+for ((i=0;i<$len;i++))
+do
+	for ((j=i+1;j<$len;j++))
+	do
+		echo lineage${arr[i]} lineage${arr[j]} 
+		vcftools --vcf ${vcffiles[k]} \
+		--weir-fst-pop ./ind_list/L${arr[i]} \
+		--weir-fst-pop ./ind_list/L${arr[j]} \
+		--keep ./ind_list/L${arr[i]} \
+		--keep ./ind_list/L${arr[j]} \
+		--out ./fst_recall/$(basename "${vcffiles[k]%.vcf}")_L${arr[i]}_L${arr[j]}_site			
+		awk '{if($3 > 0.9 && $3 !~ /nan/)print $1"\t"$2}' ./fst/$(basename "${vcffiles[k]%.vcf}")_L${arr[i]}_L${arr[j]}_site.weir.fst > fst/L${arr[i]}_L${arr[j]}_highfst
+```
+
+```R
 pairwise_fst <- read.table("./selection/fst/pairwise_fst_longdata", header = F)
 pairwise_fst_tileplot <- ggplot(pairwise_fst, aes(x = V1, y = V2, fill = V3)) + 
   geom_tile(color = rgb(45, 67,121, 0, maxColorValue = 255))+
@@ -112,9 +195,18 @@ highfst_num_tileplot <- ggplot(highfst_num, aes(x = V1, y = V2, fill = V3)) +
   coord_flip()
 highfst_num_tileplot
 ```
+
 # Selection - raisd
+```bash
+for i in {1..6}
+	do
+	echo L${i}_p
+	/data/soft/raisd/raisd-master/RAiSD -n L${i}_p -I hapAB_filter_09005.vcf -S ind_list/L${i}_p -m 0 -M 1 -y 1 -w 20 -s -t -R -P -D -f &
+	done
+```
+
 ```R
-## raisd ----------------------------------------------------------------------
+## raisd -------------------------------------------------------------------------
 library(magrittr)
 ### data prcessing ---------------------------------------------------------------
 raisd_dir <- "./selection/raisd/data/"
