@@ -363,7 +363,6 @@ do
 	python EffectorP.py -f -i ./3_seq_for_effector_prediction/${i}.complelteORF.tmhmm.fasta -o ./3_seq_for_effector_prediction/${i}.effectorP.out -E ./3_seq_for_effector_prediction/${i}.effector.fasta
 	seqkit rmdup -s ./3_seq_for_effector_prediction/${i}.effector.fasta -D ./3_seq_for_effector_prediction/${i}.effector.dup | awk '!/^>/ { printf "%s", $0; n = "\n" } /^>/ { print n $0; n = "" } END { printf "%s", n }' | awk -v p=${i} '/^>/ {gsub("TRINITY", p, $1); $0=$1} 1' > ./4_effector/${i}.effector.fasta
 
-#取CDS序列做PAV
 	awk '$1 !~ /^#/ {if($5 !~ /Non-effector/) print $1}' ./3_seq_for_effector_prediction/${i}.effectorP.out | seqkit grep -f - ./2_prediction_and_filter/${i}.complelteORF.cds.fasta | awk '!/^>/ { printf "%s", $0; n = "\n" } /^>/ { print n $0; n = "" } END { printf "%s", n }' | awk -v p=${i} '/^>/ {gsub("TRINITY", p, $1); $0=$1} 1'> ./5_effector_cds/${i}.effector.fasta
 	awk -v p=${i} '/^>/ {gsub("TRINITY", p, $1); $0=$1} 1' ./5_effector_cds/${i}.effector.fasta > ./5_effector_cds/${i}.effector.rename.fasta
 ```
