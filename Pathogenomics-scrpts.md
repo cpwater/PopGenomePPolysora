@@ -104,7 +104,7 @@ mltree_plot_combine
 ggsave(mltree_plot_combine, file = "./Admixture/admixture_tree.pdf", width = 8, height =8)
 
 ```
-## 3.2PCA
+## 3.2 PCA
 
 ```bash
 #!bin/bash
@@ -196,7 +196,7 @@ highfst_num_tileplot <- ggplot(highfst_num, aes(x = V1, y = V2, fill = V3)) +
 highfst_num_tileplot
 ```
 
-# Selection - raisd
+# 4. Selection - raisd
 ```bash
 for i in {1..6}
 	do
@@ -312,3 +312,194 @@ for (lineage in names(gr_reduced_list)){
 dev.off()
 
 ```
+
+# 5. Pan-effectorome
+## 5.1 Transcripts assemble using Trinity
+```Bash
+# using reads that unmapped to Maize B73 genome
+while read line
+do
+Trinity --seqType fq --max_memory 20G \
+	--left ${unmapped_dir}/${line}_unmapped.1.fastq \
+	--right ${unmapped_dir}/${line}_unmapped.2.fastq \
+	--CPU 20 \
+	--min_contig_length 200 \
+	--output inter/trinity_${line}
+done < ../list
+```
+## 5.2 Effector prediction
+```Bash
+contigfolder=/data//Pathogenomics/assemble/
+samples=`cat /data//Pathogenomics/tran_assemble/list`
+
+for i in $samples
+do
+	echo $i
+#trans into one-line fasta
+	cat $contigfolder/trinity_${i}.fasta | tr -d '\r' | grep -v '^$'| awk '!/^>/ { printf "%s", $0; n = "\n" } /^>/ { print n $0; n = "" } END { printf "%s", n }' > ./1_assembled_transcripts/${i}.transcripts.fasta
+#length filtering
+	awk '{if(NR%2==0) {if(length($0)>200) print prev"\n"$0} else prev=$0}' ./1_assembled_transcripts/${i}.transcripts.fasta > ./2_prediction_and_filter/${i}.transcripts.filter.fasta
+#ORF prediction using transdecoder
+	TransDecoder.LongOrfs -t ./2_prediction_and_filter/${i}.transcripts.filter.fasta
+
+#get complete ORFs
+	awk '/^>/ {flag=!/type:complete/} {if(!flag) print}' ./2_prediction_and_filter/${i}.transcripts.filter.fasta.transdecoder_dir/longest_orfs.cds > ./2_prediction_and_filter/${i}.complelteORF.cds.fasta
+	awk '/^>/ {flag=!/type:complete/} {if(!flag) print}' ./2_prediction_and_filter/${i}.transcripts.filter.fasta.transdecoder_dir/longest_orfs.pep > ./2_prediction_and_filter/${i}.complelteORF.pep.fasta
+
+#get Rust hit sequences
+	blastn -query ./2_prediction_and_filter/${i}.complelteORF.cds.fasta -out ./2_prediction_and_filter/${i}.nt.blast -db /data/db/NCBI_nt/nt -evalue 1e-5 -outfmt '6 qseqid qlen qstart qend sseqid slen sstart send qcovs bitscore evalue pident stitle' -num_threads 20
+	awk '$9 > 80' ./2_prediction_and_filter/${i}.nt.blast | sort -k1,1 -k10,10n -k11,11nr | awk '!seen[$1]++' > ./2_prediction_and_filter/${i}.nt.blast.filter
+	grep -f ./2_prediction_and_filter/rust ./2_prediction_and_filter/${i}.nt.blast.filter | awk '{print $1}' | sort -u | seqkit grep -f - -w 0 ./2_prediction_and_filter/${i}.complelteORF.cds.fasta > ./3_seq_for_effector_prediction/${i}.complelteORF.cds.fasta
+	grep -f ./2_prediction_and_filter/rust ./2_prediction_and_filter/${i}.nt.blast.filter | awk '{print $1}' | sort -u | seqkit grep -f - -w 0 ./2_prediction_and_filter/${i}.complelteORF.pep.fasta > ./3_seq_for_effector_prediction/${i}.complelteORF.pep.fasta
+
+#effector prediction
+#signalP
+	signalp -t euk ./3_seq_for_effector_prediction/${i}.complelteORF.pep.fasta > ./3_seq_for_effector_prediction/${i}.complelteORF.pep.signalP.out
+	awk '$1 !~ /^#/{if($10=="Y")print $1}' ./3_seq_for_effector_prediction/${i}.complelteORF.pep.signalP.out | grep -f - -A 1 --no-group-separator ./3_seq_for_effector_prediction/${i}.complelteORF.pep.fasta > ./3_seq_for_effector_prediction/${i}.complelteORF.signalP.fasta
+#tmhmm
+	tmhmm ./3_seq_for_effector_prediction/${i}.complelteORF.signalP.fasta > ./3_seq_for_effector_prediction/${i}.tmhmm.out
+	grep "Number of predicted TMHs:  0" ./3_seq_for_effector_prediction/${i}.tmhmm.out | awk '{print $2}' | grep -f - -A 1 --no-group-separator ./3_seq_for_effector_prediction/${i}.complelteORF.signalP.fasta > ./3_seq_for_effector_prediction/${i}.complelteORF.tmhmm.fasta
+#effectorP
+	python EffectorP.py -f -i ./3_seq_for_effector_prediction/${i}.complelteORF.tmhmm.fasta -o ./3_seq_for_effector_prediction/${i}.effectorP.out -E ./3_seq_for_effector_prediction/${i}.effector.fasta
+	seqkit rmdup -s ./3_seq_for_effector_prediction/${i}.effector.fasta -D ./3_seq_for_effector_prediction/${i}.effector.dup | awk '!/^>/ { printf "%s", $0; n = "\n" } /^>/ { print n $0; n = "" } END { printf "%s", n }' | awk -v p=${i} '/^>/ {gsub("TRINITY", p, $1); $0=$1} 1' > ./4_effector/${i}.effector.fasta
+
+#取CDS序列做PAV
+	awk '$1 !~ /^#/ {if($5 !~ /Non-effector/) print $1}' ./3_seq_for_effector_prediction/${i}.effectorP.out | seqkit grep -f - ./2_prediction_and_filter/${i}.complelteORF.cds.fasta | awk '!/^>/ { printf "%s", $0; n = "\n" } /^>/ { print n $0; n = "" } END { printf "%s", n }' | awk -v p=${i} '/^>/ {gsub("TRINITY", p, $1); $0=$1} 1'> ./5_effector_cds/${i}.effector.fasta
+	awk -v p=${i} '/^>/ {gsub("TRINITY", p, $1); $0=$1} 1' ./5_effector_cds/${i}.effector.fasta > ./5_effector_cds/${i}.effector.rename.fasta
+```
+
+## 5.3 identification of Candidate Effecor Orthogroups (CEOG)
+Using all genome effector and transcriptome effector identified above.
+```Bash
+orthofinder -f ./ -M msa -S diamond -t 20 -a 20
+```
+## 5.4 Pan-effectorome accumulation curve
+```Bash
+#transfrom OG table
+#Modified_file.txt refered to the OG table from Orthofinder result
+awk '{for (i=2; i<=NF; i++) print $1, $i}' Modified_file.txt | sort -u | sed '1igroup\tgenome' > dat_for_cor_acc.txt
+```
+Then draw the pan-effectorome accumulation curve using R
+```R
+# load packages
+library(dplyr)
+library(combinat)
+
+# load data file
+df <- read.table("./dat_for_cor_acc.txt",header =T)
+
+# create a function for counting core and accessory CEOGs
+calculate_genes <- function(df, genomes) {
+  df_sampled <- df[df$genome %in% genomes, ]
+  group_counts <- table(df_sampled$group)
+  core_genes <- sum(group_counts == length(genomes))
+  accessory_genes <- sum(group_counts < length(genomes))
+  return(data.frame(n_genomes = length(genomes), genomes = paste(genomes, collapse = ", "), core_genes = core_genes, accessory_genes = accessory_genes))
+}
+
+# create a new dataframe to store results
+results <- data.frame(n_genomes = integer(), genomes = character(), core_genes = integer(), accessory_genes = integer())
+
+genomes <- unique(df$genome)
+
+for (n in 2:length(genomes)) {
+  # list all combinations
+  combinations <- combn(genomes, n)
+  
+  # select 30 randomly if the n combinations more that 30
+  if(ncol(combinations) > 30) {
+    cols <- sample(ncol(combinations), 30)
+    combinations <- combinations[, cols]
+  }
+  
+  for (i in 1:ncol(combinations)) {
+    results <- rbind(results, calculate_genes(df, combinations[, i]))
+  }
+}
+
+pan_curve <- pivot_longer(results, cols = c("core_genes", "accessory_genes"), names_to = "group", values_to = "value")
+pan_curve_plot <- ggplot(pan_curve, aes(x = n_genomes, y = value, color = group))+
+  geom_point()+
+  geom_smooth(se = FALSE)+
+  theme_bw()+
+  scale_color_manual(labels = c("core_genes" = "Core effector", "accessory_genes" = "Accessory effector"),
+                     values = c("core_genes" = "#5ba8e6", "accessory_genes" = "#ff6392"))+
+  xlab("Number of isolates") + ylab("Number of CEOGs")+
+  theme(legend.position = c(0.25, 0.9), legend.title = element_blank(), text = element_text(size = 15))
+
+```
+
+# 5.5 PAV of pan-effectorome
+count number of CEOG in each isolate
+```Bash
+strains=$(cat strain.txt | paste -sd '\t')
+
+echo -e "OG\t$strains" > Result.txt
+
+while read -r line
+do
+	og=$(echo "$line" | cut -f1)
+	genes=$(echo "$line" | cut -f2- | tr '\t' '\n' | awk -F'_' '{print $1"_"$2}' | sort | uniq)
+	line="$og"
+	for strain in $strains; do
+		count=$(echo "$genes" | grep -o -P "^$strain\_[^\t]*" | wc -l)
+    		line+="\t$count"
+  	done
+	echo -e "$line" >>  Result.txt
+done < Orthogroups.txt
+```
+then draw in R
+```
+pav <- read.table("./pan-effector/pav/Result.txt", header = F, row.names = 1) %>% 
+  t() %>% as.data.frame() %>%
+  left_join(., popInfoDNA, by = c("OG"="Sample")) %>% replace_na(list(Lineage = "L6")) %>%
+  select(-Geo, -treeorder)
+
+pav_long <- pav %>% pivot_longer(cols = -c(OG, Lineage), names_to = "gene", values_to = "value")
+
+filter_genes <- function(lineage) {
+  pav_long %>%
+    group_by(OG, Lineage) %>%
+    summarise(lineage_count = sum(Lineage %in% lineage & value >=1),
+              other_count   = sum(!Lineage %in% lineage & value >=1),
+              .groups = "drop"
+    ) %>%
+    group_by(OG) %>%
+    summarise(min_lineage_count = min(lineage_count),
+              other_count = sum(other_count),
+              .groups = "drop"
+    ) %>%
+    filter(min_lineage_count >= 2, other_count == 0) 
+}
+
+lineages <- list("L1", "L2", "L3","L4", "L5", "L6")
+filtered_list <- purrr::map(lineages, filter_genes)
+names(filtered_list) <- lineages
+
+filtered <- bind_rows(filtered_list, .id = "Lineage") %>% group_by(OG) %>% 
+  arrange(rank)  %>% slice (1) %>% arrange(Lineage) #%>% filter(Lineage == min(Lineage)) #%>% group_by(OG) %>% slice (1)##%>% # filter(n() >= 5)
+pav_draw <- pav %>% select(Sample, filtered$OG) %>% column_to_rownames("Sample")
+
+
+filtered <- bind_rows(filtered_list, .id = "Lineage") %>% group_by(gene) %>% filter(Lineage == max(Lineage))
+pav_draw <- bind_rows(pav,pav) %>% select(OG, filtered$gene) %>%
+  mutate(OG = ifelse(duplicated(OG), paste0(OG, "_RNA"), OG)) %>%
+  column_to_rownames("OG")
+pav_draw <- read.table("./MLTree/pav_draw_absence.txt", header = T, row.names = 1)
+pav_draw[] <- lapply(pav_draw, factor)
+pav_draw <- pav_draw[, !duplicated(names(pav_draw))]
+#library("ape")
+iqtree <- treeio::read.newick("./MLTree/rnatree.phy")
+to_drop <- grep("RNA", iqtree$tip.label, value = T, invert = T)
+iqtree_drop <- drop.tip(iqtree, to_drop)
+iqtree_drop$tip.label <- sub(".{4}$", "", iqtree_drop$tip.label)
+p_rna <- ggtree(iqtree_drop)+
+  geom_tiplab(aes(label = label), show.legend = F, size = 1.5, offset = 1)
+pav_rna_tree <- gheatmap(p_rna, pav_draw, offset = 55, width = 5, font.size = 1, hjust = 0, color = rgb(45, 67,121, 0, maxColorValue = 255), colnames_offset_y = -6, colnames_angle = 90) + 
+  scale_fill_manual(values = c("4" = "#023e8a", "3" = "#0077b6" , "2" = "#0096c7", "1" = "#48cae4", "0" = "#e9ecef"))+
+  theme(legend.position = c(0.05, .8))
+ggsave(pav_rna_tree, file = "./MLTree/RNA_pav_combine_presence.pdf", width = 10, height = 2)
+```
+
+
+
